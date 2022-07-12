@@ -1,0 +1,77 @@
+name: "Manage Heroku Review Apps"
+description: Create/Delete review apps based on "create-review-app" label on github pull request
+inputs:
+  API_KEY:
+    description: "Your Heroku API key"
+    required: true
+  PIPELINE_ID:
+    description: "The id of the pipeline to deploy review app for"
+    required: true
+  BASE_NAME:
+    description: "The prefix used to generate review app name. This should be the same as what you specified for the review app URL pattern in Heroku Dashboard"
+    required: true
+branding:
+  icon: "play-circle"
+  color: "purple"
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Generate app name
+      shell: bash
+      run: |
+        echo "APP_NAME=${BASE_NAME}-pr-${{ github.event.number }}" >> $GITHUB_ENV
+    - name: Create Source Endpoint
+      if: |
+        (github.event.action == 'opened' && contains( github.event.pull_request.labels.*.name, 'create-review-app')) 
+        || (github.event.action == 'reopened' && contains( github.event.pull_request.labels.*.name, 'create-review-app'))
+        || (github.event.action == 'labeled' && github.event.label.name == 'create-review-app')
+      id: source_endpoint
+      shell: bash
+      run: |
+        export RESPONSE=$(curl -X POST https://api.heroku.com/sources \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/vnd.heroku+json; version=3" \
+        -H "Authorization: Bearer ${API_KEY}")
+        export SOURCE_ENDPOINT=$(echo $RESPONSE | jq -r '{get: .source_blob.get_url, put: .source_blob.put_url}')
+        echo "Source endpoint : $SOURCE_ENDPOINT"
+        echo ::set-output name=SOURCE_ENDPOINT::$SOURCE_ENDPOINT
+        tar -czvf source.tar.gz *
+        export URL=$(echo ${SOURCE_ENDPOINT} | jq -r '.put')
+        curl $URL -X PUT -H 'Content-Type:' --data-binary @source.tar.gz
+    - name: Create Review App
+      if: |
+        (github.event.action == 'opened' && contains( github.event.pull_request.labels.*.name, 'create-review-app')) 
+        || (github.event.action == 'reopened' && contains( github.event.pull_request.labels.*.name, 'create-review-app'))
+        || (github.event.action == 'labeled' && github.event.label.name == 'create-review-app')
+      shell: bash
+      run: |
+        export SOURCE_GET_URL=$(echo ${{ toJSON(steps.source_endpoint.outputs.SOURCE_ENDPOINT) }} | jq -r '.get')
+        echo "Creating review app named $APP_NAME"
+        curl -X POST https://api.heroku.com/review-apps \
+        -d "{
+        \"source_blob\": {\"url\": \"${SOURCE_GET_URL}\", \"version\": \"${{ github.event.pull_request.head.sha }}\"},
+        \"branch\": \"${{ github.head_ref }}\",
+        \"pipeline\": \"${PIPELINE_ID}\",
+        \"pr_number\": ${{ github.event.number }}
+        }" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/vnd.heroku+json; version=3" \
+        -H "Authorization: Bearer ${API_KEY}"
+    - name: Delete Review App
+      if: |
+        (github.event.action == 'closed' && contains( github.event.pull_request.labels.*.name, 'create-review-app')) 
+        || (github.event.action == 'unlabeled' && github.event.label.name == 'create-review-app')
+      shell: bash
+      run: |
+        echo "Deleting review app named $APP_NAME"
+        export REVIEW_APP_ID=$(curl -X GET https://api.heroku.com/apps/$APP_NAME/review-app \
+        -H 'Accept: application/vnd.heroku+json; version=3' \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${API_KEY}" | \
+        jq -r '.id')
+        curl -X DELETE https://api.heroku.com/review-apps/$REVIEW_APP_ID \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/vnd.heroku+json; version=3" \
+        -H "Authorization: Bearer ${API_KEY}"
